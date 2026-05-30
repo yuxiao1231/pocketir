@@ -18,9 +18,9 @@ android {
     signingConfigs {
         release {
             storeFile file("release.jks")
-            storePassword "pocketir"
-            keyAlias "pocketir"
-            keyPassword "pocketir"
+            storePassword project.hasProperty('storePassword') ? project.property('storePassword') : "pocketir"
+            keyAlias project.hasProperty('keyAlias') ? project.property('keyAlias') : "pocketir"
+            keyPassword project.hasProperty('keyPassword') ? project.property('keyPassword') : "pocketir"
         }
     }
 
