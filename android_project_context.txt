@@ -1,0 +1,3181 @@
+
+============================================================
+File: build.gradle
+============================================================
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.2.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.20"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+
+============================================================
+File: settings.gradle
+============================================================
+
+rootProject.name = 'PocketIR'
+include ':app'
+
+
+============================================================
+File: app\build.gradle
+============================================================
+
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.xiao.pocketir'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.xiao.pocketir"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    buildFeatures {
+        compose true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion '1.5.4'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    packaging {
+        resources {
+            excludes += '/META-INF/{AL2.0,LGPL2.1}'
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0'
+    implementation 'androidx.activity:activity-compose:1.8.2'
+    implementation 'androidx.navigation:navigation-compose:2.7.7'
+    implementation 'androidx.datastore:datastore-preferences:1.1.1'
+
+    implementation platform('androidx.compose:compose-bom:2024.02.00')
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-extended'
+}
+
+
+============================================================
+File: app\src\main\AndroidManifest.xml
+============================================================
+
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.TRANSMIT_IR" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:theme="@style/AppTheme"
+        android:requestLegacyExternalStorage="true"
+        tools:targetApi="31">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\data\BookmarkManager.kt
+============================================================
+
+package com.xiao.pocketir.data
+
+import android.content.Context
+import com.xiao.pocketir.model.DeviceMeta
+import com.xiao.pocketir.model.DeviceType
+import com.xiao.pocketir.model.FlipperCommand
+import com.xiao.pocketir.model.FlipperSignalType
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+
+object BookmarkManager {
+    private const val FILE_NAME = "bookmarks.json"
+    private const val TEMP_FILE_NAME = "bookmarks.json.tmp"
+
+    fun load(context: Context): List<DeviceMeta> {
+        val file = File(context.filesDir, FILE_NAME)
+        if (!file.exists()) return emptyList()
+
+        return runCatching {
+            val array = JSONArray(file.readText())
+            List(array.length()) { index ->
+                parseDevice(array.getJSONObject(index))
+            }
+        }.getOrElse { emptyList() }
+    }
+
+    fun save(context: Context, devices: List<DeviceMeta>) {
+        val array = JSONArray()
+        devices.forEach { device -> array.put(serializeDevice(device)) }
+
+        val target = File(context.filesDir, FILE_NAME)
+        val temp = File(context.filesDir, TEMP_FILE_NAME)
+        temp.writeText(array.toString())
+        if (target.exists()) {
+            target.delete()
+        }
+        temp.renameTo(target)
+    }
+
+    fun upsert(context: Context, device: DeviceMeta): List<DeviceMeta> {
+        val current = load(context)
+        val next = current.filterNot { sameDevice(it, device) } + device
+        save(context, next)
+        return next
+    }
+
+    fun remove(context: Context, device: DeviceMeta): List<DeviceMeta> {
+        val next = load(context).filterNot { sameDevice(it, device) }
+        save(context, next)
+        return next
+    }
+
+    private fun sameDevice(left: DeviceMeta, right: DeviceMeta): Boolean {
+        return left.category == right.category &&
+            left.brand == right.brand &&
+            left.model == right.model &&
+            left.sourcePath == right.sourcePath
+    }
+
+    private fun parseDevice(json: JSONObject): DeviceMeta {
+        val commands = json.optJSONArray("embeddedCommands")?.let(::parseCommands).orEmpty()
+        return DeviceMeta(
+            category = json.getString("category"),
+            brand = json.getString("brand"),
+            model = json.getString("model"),
+            sourcePath = json.getString("sourcePath"),
+            type = DeviceType.valueOf(json.optString("type", DeviceType.GENERIC.name)),
+            embeddedCommands = commands
+        )
+    }
+
+    private fun serializeDevice(device: DeviceMeta): JSONObject {
+        return JSONObject().apply {
+            put("category", device.category)
+            put("brand", device.brand)
+            put("model", device.model)
+            put("sourcePath", device.sourcePath)
+            put("type", device.type.name)
+            if (device.embeddedCommands.isNotEmpty()) {
+                put("embeddedCommands", serializeCommands(device.embeddedCommands))
+            }
+        }
+    }
+
+    private fun parseCommands(array: JSONArray): List<FlipperCommand> {
+        return List(array.length()) { index ->
+            val item = array.getJSONObject(index)
+            FlipperCommand(
+                name = item.getString("name"),
+                type = FlipperSignalType.valueOf(item.optString("type", FlipperSignalType.PARSED.name)),
+                protocol = item.optString("protocol").ifBlank { null },
+                address = item.optString("address").ifBlank { null },
+                command = item.optString("command").ifBlank { null },
+                frequency = item.optInt("frequency").takeIf { it > 0 },
+                dutyCycle = item.optDouble("dutyCycle", -1.0).takeIf { it >= 0.0 }?.toFloat(),
+                rawData = item.optJSONArray("rawData")?.let { rawArray ->
+                    List(rawArray.length()) { rawIndex -> rawArray.getInt(rawIndex) }
+                }.orEmpty()
+            )
+        }
+    }
+
+    private fun serializeCommands(commands: List<FlipperCommand>): JSONArray {
+        return JSONArray().apply {
+            commands.forEach { command ->
+                put(
+                    JSONObject().apply {
+                        put("name", command.name)
+                        put("type", command.type.name)
+                        command.protocol?.let { put("protocol", it) }
+                        command.address?.let { put("address", it) }
+                        command.command?.let { put("command", it) }
+                        command.frequency?.let { put("frequency", it) }
+                        command.dutyCycle?.let { put("dutyCycle", it) }
+                        if (command.rawData.isNotEmpty()) {
+                            put(
+                                "rawData",
+                                JSONArray().apply {
+                                    command.rawData.forEach(::put)
+                                }
+                            )
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\data\IrRepository.kt
+============================================================
+
+package com.xiao.pocketir.data
+
+import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
+import android.util.Log
+import com.xiao.pocketir.i18n.I18n
+import com.xiao.pocketir.model.DeviceMeta
+import com.xiao.pocketir.model.DeviceType
+import com.xiao.pocketir.model.FlipperCommand
+import com.xiao.pocketir.model.FlipperSignalType
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+
+object IrRepository {
+    private const val TAG = "IrRepository"
+    private val libraryCache = linkedMapOf<String, Library>()
+
+    @Synchronized
+    fun open(rootPath: String): Library {
+        return libraryCache.getOrPut(rootPath) { Library(rootPath) }
+    }
+
+    fun getCommands(device: DeviceMeta): List<FlipperCommand> {
+        if (device.embeddedCommands.isNotEmpty()) {
+            return device.embeddedCommands
+        }
+
+        val file = File(device.sourcePath)
+        if (!file.exists()) return emptyList()
+
+        return when {
+            file.isFile && file.extension.equals("db", ignoreCase = true) -> getCommandsFromDb(device)
+            file.isFile && file.extension.equals("ir", ignoreCase = true) -> parseFlipperFile(device.sourcePath)
+            else -> emptyList()
+        }
+    }
+
+    class Library internal constructor(private val rootPath: String) {
+        private var searchIndex: SearchIndex? = null
+
+        // 异步初始化，防止 HyperOS 等环境在 UI 线程建表导致闪退
+        suspend fun ensureIndexed() = withContext(Dispatchers.IO) {
+            if (searchIndex == null) {
+                searchIndex = buildSearchIndex(rootPath)
+            }
+        }
+
+        fun getDeviceList(): List<DeviceMeta> = searchIndex?.allDevices ?: emptyList()
+
+        fun search(query: String): List<DeviceMeta> = searchIndex?.search(query) ?: emptyList()
+    }
+
+    private data class SearchIndex(
+        val db: SQLiteDatabase,
+        val devicesByKey: LinkedHashMap<String, DeviceMeta>
+    ) {
+        val allDevices: List<DeviceMeta> = devicesByKey.values.sortedWith(
+            compareBy(DeviceMeta::category, DeviceMeta::brand, DeviceMeta::model)
+        )
+
+        fun search(query: String): List<DeviceMeta> {
+            val trimmed = query.trim()
+            if (trimmed.isEmpty()) return allDevices
+
+            val deviceKeys = linkedSetOf<String>()
+            buildFtsQuery(trimmed)?.let { matchQuery ->
+                runCatching {
+                    db.rawQuery(
+                        """
+                        SELECT device_key, MIN(rank)
+                        FROM (
+                            SELECT device_key, bm25(ir_search) AS rank
+                            FROM ir_search
+                            WHERE ir_search MATCH ?
+                        )
+                        GROUP BY device_key
+                        ORDER BY MIN(rank)
+                        """.trimIndent(),
+                        arrayOf(matchQuery)
+                    ).use { cursor ->
+                        while (cursor.moveToNext()) {
+                            deviceKeys += cursor.getString(0)
+                        }
+                    }
+                }.onFailure {
+                    Log.w(TAG, "FTS query failed for '$trimmed'", it)
+                }
+            }
+
+            val likeQuery = "%${escapeLike(trimmed)}%"
+            db.rawQuery(
+                """
+                SELECT DISTINCT device_key
+                FROM ir_search
+                WHERE brand LIKE ? ESCAPE '\'
+                   OR model LIKE ? ESCAPE '\'
+                   OR category LIKE ? ESCAPE '\'
+                   OR btn_name LIKE ? ESCAPE '\'
+                ORDER BY brand, model
+                """.trimIndent(),
+                arrayOf(likeQuery, likeQuery, likeQuery, likeQuery)
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    deviceKeys += cursor.getString(0)
+                }
+            }
+
+            if (deviceKeys.isEmpty()) {
+                return allDevices.filter { device ->
+                    listOf(device.category, device.brand, device.model).any {
+                        it.contains(trimmed, ignoreCase = true)
+                    }
+                }
+            }
+
+            return deviceKeys.mapNotNull(devicesByKey::get)
+        }
+    }
+
+    private fun buildSearchIndex(rootPath: String): SearchIndex {
+        val file = File(rootPath)
+        val searchDb = SQLiteDatabase.create(null)
+        val devices = linkedMapOf<String, DeviceMeta>()
+
+        createSearchTable(searchDb)
+
+        if (!file.exists()) {
+            return SearchIndex(searchDb, devices)
+        }
+
+        when {
+            file.isFile && file.extension.equals("db", ignoreCase = true) -> {
+                indexDbSource(file.absolutePath, searchDb, devices)
+            }
+
+            file.isDirectory -> {
+                indexDirectorySource(file, searchDb, devices)
+            }
+        }
+
+        return SearchIndex(searchDb, devices)
+    }
+
+    private fun createSearchTable(db: SQLiteDatabase) {
+        runCatching {
+            // 第一梯队：尝试功能最全的 FTS5
+            db.execSQL(
+                """
+                CREATE VIRTUAL TABLE ir_search USING fts5(
+                    device_key UNINDEXED,
+                    category,
+                    brand,
+                    model,
+                    btn_name,
+                    tokenize='unicode61'
+                )
+                """.trimIndent()
+            )
+        }.onFailure { e1 ->
+            Log.w(TAG, "System doesn't support FTS5 or unicode61, fallback to FTS4", e1)
+            
+            runCatching {
+                // 第二梯队：降级尝试 FTS4
+                db.execSQL(
+                    """
+                    CREATE VIRTUAL TABLE ir_search USING fts4(
+                        device_key,
+                        category,
+                        brand,
+                        model,
+                        btn_name
+                    )
+                    """.trimIndent()
+                )
+            }.onFailure { e2 ->
+                Log.e(TAG, "FTS entirely unsupported, fallback to standard table", e2)
+                
+                // 第三梯队：终极保底，建普通表
+                db.execSQL(
+                    """
+                    CREATE TABLE ir_search(
+                        device_key TEXT,
+                        category TEXT,
+                        brand TEXT,
+                        model TEXT,
+                        btn_name TEXT
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+    }
+
+    private fun indexDbSource(
+        dbPath: String,
+        searchDb: SQLiteDatabase,
+        devices: LinkedHashMap<String, DeviceMeta>
+    ) {
+        try {
+            SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                db.rawQuery(
+                    """
+                    SELECT category, brand, model, btn_name
+                    FROM ir_commands
+                    ORDER BY category, brand, model, btn_name
+                    """.trimIndent(),
+                    null
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val meta = buildDeviceMeta(
+                            category = cursor.getString(0),
+                            brand = cursor.getString(1),
+                            model = cursor.getString(2),
+                            sourcePath = dbPath
+                        )
+                        val key = keyOf(meta)
+                        devices.putIfAbsent(key, meta)
+                        insertSearchRow(searchDb, key, meta, cursor.getString(3))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to index IR database", e)
+        }
+    }
+
+    private fun indexDirectorySource(
+        dir: File,
+        searchDb: SQLiteDatabase,
+        devices: LinkedHashMap<String, DeviceMeta>
+    ) {
+        dir.walkTopDown()
+            .filter { it.isFile && it.extension.equals("ir", ignoreCase = true) }
+            .forEach { file ->
+                val meta = buildDeviceMetaFromFile(dir, file)
+                val key = keyOf(meta)
+                devices.putIfAbsent(key, meta)
+
+                val commands = parseFlipperFile(file.absolutePath)
+                if (commands.isEmpty()) {
+                    insertSearchRow(searchDb, key, meta, "")
+                } else {
+                    commands.forEach { command ->
+                        insertSearchRow(searchDb, key, meta, command.name)
+                    }
+                }
+            }
+    }
+
+    private fun insertSearchRow(
+        db: SQLiteDatabase,
+        deviceKey: String,
+        meta: DeviceMeta,
+        buttonName: String
+    ) {
+        val values = ContentValues().apply {
+            put("device_key", deviceKey)
+            put("category", meta.category)
+            put("brand", meta.brand)
+            put("model", meta.model)
+            put("btn_name", buttonName)
+        }
+        db.insert("ir_search", null, values)
+    }
+
+    private fun getCommandsFromDb(device: DeviceMeta): List<FlipperCommand> {
+        val commands = mutableListOf<FlipperCommand>()
+        try {
+            SQLiteDatabase.openDatabase(device.sourcePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                db.rawQuery(
+                    """
+                    SELECT btn_name, type, protocol, address, command, frequency, raw_data
+                    FROM ir_commands
+                    WHERE category = ? AND brand = ? AND model = ?
+                    ORDER BY btn_name
+                    """.trimIndent(),
+                    arrayOf(device.category, device.brand, device.model)
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val typeStr = cursor.getString(1) ?: "parsed"
+                        val type = if (typeStr.equals("raw", ignoreCase = true)) FlipperSignalType.RAW else FlipperSignalType.PARSED
+                        
+                        val rawDataList = if (type == FlipperSignalType.RAW) {
+                            cursor.getString(6)
+                                ?.split(Regex("\\s+"))
+                                ?.mapNotNull { it.toIntOrNull() }
+                                .orEmpty()
+                        } else {
+                            emptyList()
+                        }
+
+                        commands += FlipperCommand(
+                            name = cursor.getString(0),
+                            type = type,
+                            protocol = cursor.getString(2),
+                            address = cursor.getString(3),
+                            command = cursor.getString(4),
+                            frequency = if (cursor.isNull(5)) null else cursor.getInt(5),
+                            rawData = rawDataList
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to extract commands from DB", e)
+        }
+        return commands
+    }
+
+    private fun parseFlipperFile(path: String): List<FlipperCommand> {
+        val commands = mutableListOf<FlipperCommand>()
+        val fields = linkedMapOf<String, String>()
+
+        fun flush() {
+            toFlipperCommand(fields)?.let(commands::add)
+            fields.clear()
+        }
+
+        File(path).forEachLine { rawLine ->
+            val line = rawLine.trim()
+            when {
+                line.isEmpty() -> Unit
+                line == "#" -> flush()
+                line.startsWith("#") -> Unit
+                !line.contains(':') -> Unit
+                else -> {
+                    val key = line.substringBefore(':').trim()
+                    val value = line.substringAfter(':').trim()
+                    fields[key] = value
+                    if (key == "command" || key == "data") {
+                        flush()
+                    }
+                }
+            }
+        }
+
+        flush()
+        return commands
+    }
+
+    private fun toFlipperCommand(fields: Map<String, String>): FlipperCommand? {
+        val name = fields["name"] ?: return null
+        val type = when (fields["type"]?.lowercase()) {
+            "raw" -> FlipperSignalType.RAW
+            else -> FlipperSignalType.PARSED
+        }
+
+        return when (type) {
+            FlipperSignalType.PARSED -> {
+                val protocol = fields["protocol"] ?: return null
+                val address = fields["address"] ?: return null
+                val command = fields["command"] ?: return null
+                FlipperCommand(
+                    name = name,
+                    type = type,
+                    protocol = protocol,
+                    address = address,
+                    command = command
+                )
+            }
+
+            FlipperSignalType.RAW -> {
+                val data = fields["data"]
+                    ?.split(Regex("\\s+"))
+                    ?.mapNotNull { it.toIntOrNull() }
+                    .orEmpty()
+                if (data.isEmpty()) return null
+
+                FlipperCommand(
+                    name = name,
+                    type = type,
+                    frequency = fields["frequency"]?.toIntOrNull(),
+                    dutyCycle = fields["duty_cycle"]?.toFloatOrNull(),
+                    rawData = data
+                )
+            }
+        }
+    }
+
+    private fun buildDeviceMetaFromFile(rootDir: File, file: File): DeviceMeta {
+        val parent = file.parentFile
+        val grandParent = parent?.parentFile
+        val brand = parent?.name ?: I18n.t("device_brand_unknown")
+        val category = if (grandParent != null && grandParent.absolutePath != rootDir.absolutePath) {
+            grandParent.name
+        } else {
+            I18n.t("device_category_general")
+        }
+
+        return buildDeviceMeta(
+            category = category,
+            brand = brand,
+            model = file.nameWithoutExtension,
+            sourcePath = file.absolutePath
+        )
+    }
+
+    private fun buildDeviceMeta(
+        category: String,
+        brand: String,
+        model: String,
+        sourcePath: String,
+        embeddedCommands: List<FlipperCommand> = emptyList()
+    ): DeviceMeta {
+        return DeviceMeta(
+            category = category,
+            brand = brand,
+            model = model,
+            sourcePath = sourcePath,
+            type = inferDeviceType(category, brand, model),
+            embeddedCommands = embeddedCommands
+        )
+    }
+
+    private fun keyOf(device: DeviceMeta): String {
+        return "${device.sourcePath}|${device.category}|${device.brand}|${device.model}"
+    }
+
+    private fun buildFtsQuery(query: String): String? {
+        val tokens = Regex("[\\p{L}\\p{N}_]+")
+            .findAll(query)
+            .map { it.value.lowercase() }
+            .filter { it.isNotBlank() }
+            .toList()
+
+        if (tokens.isEmpty()) return null
+        return tokens.joinToString(" AND ") { "$it*" }
+    }
+
+    private fun escapeLike(value: String): String {
+        return value
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+    }
+
+    private fun inferDeviceType(category: String, brand: String, model: String): DeviceType {
+        val haystack = "$category $brand $model".lowercase()
+        return if (
+            haystack.contains("ac") ||
+            haystack.contains("air") ||
+            haystack.contains("conditioner") ||
+            haystack.contains("hvac") ||
+            haystack.contains("空调")
+        ) {
+            DeviceType.AC
+        } else {
+            DeviceType.GENERIC
+        }
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\data\SettingsRepository.kt
+============================================================
+
+package com.xiao.pocketir.data
+
+import android.content.Context
+import android.os.Environment
+import androidx.datastore.preferences.SharedPreferencesMigration
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.map
+import java.io.IOException
+
+private val Context.settingsDataStore by preferencesDataStore(
+    name = "settings",
+    produceMigrations = { context ->
+        listOf(SharedPreferencesMigration(context, "config"))
+    }
+)
+
+data class UserSettings(
+    val currentPath: String = SettingsRepository.defaultLibraryPath(),
+    val isDarkMode: Boolean = false
+)
+
+class SettingsRepository(private val context: Context) {
+    val settings: Flow<UserSettings> = context.settingsDataStore.data
+        .catch { error ->
+            if (error is IOException) {
+                emit(emptyPreferencesCompat())
+            } else {
+                throw error
+            }
+        }
+        .map { preferences ->
+            UserSettings(
+                currentPath = preferences[Keys.CurrentPath] ?: defaultLibraryPath(),
+                isDarkMode = preferences[Keys.DarkMode] ?: false
+            )
+        }
+
+    suspend fun setCurrentPath(path: String) {
+        context.settingsDataStore.edit { preferences ->
+            preferences[Keys.CurrentPath] = path
+        }
+    }
+
+    suspend fun setDarkMode(isDarkMode: Boolean) {
+        context.settingsDataStore.edit { preferences ->
+            preferences[Keys.DarkMode] = isDarkMode
+        }
+    }
+
+    private object Keys {
+        val CurrentPath = stringPreferencesKey("db_path")
+        val DarkMode = booleanPreferencesKey("dark_mode")
+    }
+
+    companion object {
+        fun defaultLibraryPath(): String {
+            return Environment.getExternalStorageDirectory().absolutePath + "/pocketir/pocket_ir.db"
+        }
+    }
+}
+
+private fun emptyPreferencesCompat() = androidx.datastore.preferences.core.emptyPreferences()
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\i18n\I18n.kt
+============================================================
+
+package com.xiao.pocketir.i18n
+
+import android.content.Context
+import org.json.JSONObject
+import java.io.File
+import java.util.Locale
+
+object I18n {
+    private const val FALLBACK_LANG = "en"
+
+    private var fallbackData = JSONObject()
+    private var langData = JSONObject()
+
+    fun init(context: Context) {
+        val prefs = context.getSharedPreferences("config", Context.MODE_PRIVATE)
+        val forcedLang = prefs.getString("forced_language", "auto") ?: "auto"
+        val activeTag = if (forcedLang == "auto") Locale.getDefault().toLanguageTag() else forcedLang
+
+        fallbackData = loadLangJson(context, FALLBACK_LANG)
+        langData = loadLangJson(context, activeTag)
+
+        if (langData.length() == 0 && activeTag.contains("-")) {
+            val baseTag = activeTag.substringBefore("-")
+            if (baseTag != FALLBACK_LANG) {
+                langData = loadLangJson(context, baseTag)
+            }
+        }
+    }
+
+    fun t(key: String, vararg args: Any?): String {
+        val raw = when {
+            langData.has(key) -> langData.getString(key)
+            fallbackData.has(key) -> fallbackData.getString(key)
+            else -> key
+        }
+        return runCatching {
+            if (args.isEmpty()) raw else String.format(Locale.getDefault(), raw, *args)
+        }.getOrDefault(raw)
+    }
+
+    private fun loadLangJson(context: Context, langTag: String): JSONObject {
+        val assetPath = "langs/$langTag.json"
+        val overrideFile = File(context.getExternalFilesDir(null), assetPath)
+
+        if (overrideFile.exists()) {
+            return runCatching { JSONObject(overrideFile.readText()) }.getOrDefault(JSONObject())
+        }
+
+        return runCatching {
+            val text = context.assets.open(assetPath).bufferedReader().use { it.readText() }
+            JSONObject(text)
+        }.getOrDefault(JSONObject())
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ir\HapticEngine.kt
+============================================================
+
+package com.xiao.pocketir.ir
+
+import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+
+object HapticEngine {
+    fun lightTap(context: Context) {
+        vibrate(context, 18)
+    }
+
+    fun heavyTap(context: Context) {
+        vibrate(context, 40)
+    }
+
+    private fun vibrate(context: Context, durationMs: Long) {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+            manager?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        } ?: return
+
+        if (!vibrator.hasVibrator()) return
+        vibrator.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ir\IrCooldown.kt
+============================================================
+
+package com.xiao.pocketir.ir
+
+import android.os.SystemClock
+
+object IrCooldown {
+    private const val COOLDOWN_MS = 600L
+    private var lastFireAt = 0L
+
+    fun tryAcquire(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastFireAt < COOLDOWN_MS) return false
+        lastFireAt = now
+        return true
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ir\IrDecoder.kt
+============================================================
+
+package com.xiao.pocketir.ir
+
+import android.util.Log
+import com.xiao.pocketir.model.FlipperCommand
+import com.xiao.pocketir.model.FlipperSignalType
+
+object IrDecoder {
+    private const val TAG = "IrDecoder"
+    private const val DEFAULT_RAW_FREQUENCY = 38_000
+    private const val FREQUENCY_NEC = 38_000
+    private const val FREQUENCY_SIRC = 40_000 // 🌟 Sony 专属 40kHz 载波
+
+    fun normalizeFlipperHex(input: String, requiredBytes: Int = 4): String? {
+        val stripped = input.trim()
+        if (stripped.isEmpty()) return null
+
+        val tokens = stripped.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val bytes = when {
+            tokens.size == requiredBytes && tokens.all { it.matches(Regex("[0-9A-Fa-f]{2}")) } -> {
+                tokens.map { it.uppercase() }
+            }
+            stripped.matches(Regex("[0-9A-Fa-f]{${requiredBytes * 2}}")) -> {
+                stripped.chunked(2).map { it.uppercase() }
+            }
+            else -> return null
+        }
+        return bytes.joinToString(" ")
+    }
+
+    fun buildPattern(command: FlipperCommand): IntArray? {
+        return when (command.type) {
+            FlipperSignalType.RAW -> command.rawData.takeIf { it.isNotEmpty() }?.toIntArray()
+            FlipperSignalType.PARSED -> buildParsedPattern(command)
+        }
+    }
+
+    fun resolveFrequency(command: FlipperCommand): Int {
+        return when (command.type) {
+            FlipperSignalType.RAW -> command.frequency ?: DEFAULT_RAW_FREQUENCY
+            FlipperSignalType.PARSED -> {
+                // 🌟 识别 Sony 协议并切换频率
+                if (command.protocol?.uppercase()?.startsWith("SIRC") == true) FREQUENCY_SIRC else FREQUENCY_NEC
+            }
+        }
+    }
+
+    private fun buildParsedPattern(command: FlipperCommand): IntArray? {
+        val protocol = command.protocol?.uppercase() ?: return null
+        val address = normalizeFlipperHex(command.address ?: return null) ?: return null
+        val payload = normalizeFlipperHex(command.command ?: return null) ?: return null
+
+        return when (protocol) {
+            "NEC" -> parseNecBytes(address, payload)?.let(::buildNecPattern)
+            "NECEXT" -> parseNecExtBytes(address, payload)?.let(::buildNecPattern)
+            // 🌟 加入 Sony SIRC 家族支持
+            "SIRC" -> buildSircPattern(address, payload, 12)
+            "SIRC15" -> buildSircPattern(address, payload, 15)
+            "SIRC20" -> buildSircPattern(address, payload, 20)
+            else -> {
+                Log.w(TAG, "Unsupported parsed protocol: $protocol")
+                null
+            }
+        }
+    }
+
+    // ==========================================
+    // NEC 协议组
+    // ==========================================
+    private fun parseNecBytes(addressStr: String, commandStr: String): IntArray? {
+        return try {
+            val addressByte = parseBytes(addressStr).first().toInt() and 0xFF
+            val commandByte = parseBytes(commandStr).first().toInt() and 0xFF
+            intArrayOf(addressByte, addressByte.inv() and 0xFF, commandByte, commandByte.inv() and 0xFF)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun parseNecExtBytes(addressStr: String, commandStr: String): IntArray? {
+        return try {
+            val addressBytes = parseBytes(addressStr)
+            val commandBytes = parseBytes(commandStr)
+            intArrayOf(
+                addressBytes[0].toInt() and 0xFF,
+                addressBytes[1].toInt() and 0xFF,
+                commandBytes[0].toInt() and 0xFF,
+                commandBytes[1].toInt() and 0xFF
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun buildNecPattern(bytes: IntArray): IntArray {
+        val frame = mutableListOf<Int>()
+        // 1. 发送完整的初始帧 (9000 mark + 4500 space)
+        frame += 9000
+        frame += 4500
+
+        bytes.forEach { byte ->
+            repeat(8) { bitIndex ->
+                val bit = (byte shr bitIndex) and 0x01
+                frame += 560
+                frame += if (bit == 1) 1690 else 560
+            }
+        }
+        frame += 560
+        frame += 40_000 // 帧与帧之间的静默等待期
+
+        // 🌟 2. 构造标准 NEC 重复码 (Repeat Code: 9000 mark + 2250 space + 560 mark)
+        val repeatCode = listOf(9000, 2250, 560, 40_000)
+
+        // 组装发射序列：1次完整帧 + 1次重复码（模拟真实遥控器按压时长）
+        val pattern = mutableListOf<Int>()
+        pattern.addAll(frame)
+        pattern.addAll(repeatCode)
+        
+        return pattern.toIntArray()
+    }
+    
+    // ==========================================
+    // 🌟 SIRC 协议组 (Sony)
+    // ==========================================
+    private fun buildSircPattern(addressStr: String, commandStr: String, bitLength: Int): IntArray? {
+        return try {
+            val addressBytes = parseBytes(addressStr)
+            val commandBytes = parseBytes(commandStr)
+
+            // Flipper 是小端序存储的，拼凑出完整的 Int
+            var addrInt = 0
+            addressBytes.forEachIndexed { i, b -> addrInt = addrInt or ((b.toInt() and 0xFF) shl (8 * i)) }
+            var cmdInt = 0
+            commandBytes.forEachIndexed { i, b -> cmdInt = cmdInt or ((b.toInt() and 0xFF) shl (8 * i)) }
+
+            val frame = mutableListOf<Int>()
+            frame += 2400
+            frame += 600
+
+            // SIRC 规定先发 7 bit 的 Command
+            repeat(7) { bitIndex ->
+                val bit = (cmdInt shr bitIndex) and 0x01
+                frame += if (bit == 1) 1200 else 600
+                frame += 600
+            }
+
+            // 再发剩下的 Address bits
+            val addrBits = bitLength - 7
+            repeat(addrBits) { bitIndex ->
+                val bit = (addrInt shr bitIndex) and 0x01
+                frame += if (bit == 1) 1200 else 600
+                frame += 600
+            }
+
+            frame[frame.lastIndex] = 40_000 // 补足帧尾静默期
+
+            // 🌟 Sony 电视铁律：必须至少连续收到 3 帧才会响应！
+            val pattern = mutableListOf<Int>()
+            repeat(3) { pattern.addAll(frame) }
+            pattern.toIntArray()
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to build SIRC pattern", e)
+            null
+        }
+    }
+
+    private fun parseBytes(value: String): ByteArray {
+        return normalizeFlipperHex(value)
+            ?.split(" ")
+            ?.map { it.toInt(16).toByte() }
+            ?.toByteArray()
+            ?: error("Invalid hex payload")
+    }
+}
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ir\IrTransmitter.kt
+============================================================
+
+package com.xiao.pocketir.ir
+
+import android.content.Context
+import android.hardware.ConsumerIrManager
+import android.util.Log
+import android.widget.Toast
+import com.xiao.pocketir.i18n.I18n
+import com.xiao.pocketir.model.FlipperCommand
+
+object IrTransmitter {
+    fun transmit(
+        context: Context,
+        irManager: ConsumerIrManager?,
+        command: FlipperCommand
+    ): Boolean {
+        if (irManager == null || !irManager.hasIrEmitter()) {
+            Toast.makeText(context, I18n.t("error_no_ir"), Toast.LENGTH_SHORT).show()
+            return false
+        }
+
+        val pattern = IrDecoder.buildPattern(command)
+        if (pattern == null) {
+            Toast.makeText(context, I18n.t("error_protocol_unsupported"), Toast.LENGTH_SHORT).show()
+            return false
+        }
+
+        if (!IrCooldown.tryAcquire()) {
+            return false
+        }
+
+        return runCatching {
+            irManager.transmit(IrDecoder.resolveFrequency(command), pattern)
+            Log.d("PocketIR", I18n.t("log_ir_fired", command.name, command.protocol ?: command.type.name))
+            true
+        }.getOrElse {
+            Log.e("PocketIR", "IR transmit failed", it)
+            false
+        }
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\model\Models.kt
+============================================================
+
+package com.xiao.pocketir.model
+
+enum class DeviceType {
+    GENERIC,
+    AC
+}
+
+enum class FlipperSignalType {
+    PARSED,
+    RAW
+}
+
+data class FlipperCommand(
+    val name: String,
+    val type: FlipperSignalType = FlipperSignalType.PARSED,
+    val protocol: String? = null,
+    val address: String? = null,
+    val command: String? = null,
+    val frequency: Int? = null,
+    val dutyCycle: Float? = null,
+    val rawData: List<Int> = emptyList()
+) {
+    val isParsed: Boolean
+        get() = type == FlipperSignalType.PARSED
+
+    val isRaw: Boolean
+        get() = type == FlipperSignalType.RAW
+}
+
+data class DeviceMeta(
+    val category: String,
+    val brand: String,
+    val model: String,
+    val sourcePath: String,
+    val type: DeviceType = DeviceType.GENERIC,
+    val embeddedCommands: List<FlipperCommand> = emptyList()
+) {
+    val isCustom: Boolean
+        get() = sourcePath.startsWith("bookmark://")
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\AppRoot.kt
+============================================================
+
+package com.xiao.pocketir.ui
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.hardware.ConsumerIrManager
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.DocumentsContract
+import android.provider.Settings
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import com.xiao.pocketir.i18n.I18n
+import com.xiao.pocketir.ui.screens.HomeScreen
+import com.xiao.pocketir.ui.screens.LibraryScreen
+import com.xiao.pocketir.ui.screens.NecEditor
+import com.xiao.pocketir.ui.screens.PanelScreen
+import com.xiao.pocketir.ui.theme.PocketIrTheme
+import org.json.JSONObject
+
+private object AppRoute {
+    const val Home = "home"
+    const val Library = "library"
+    const val Panel = "panel"
+    const val Editor = "editor"
+}
+
+private data class LangOption(val displayName: String, val tag: String)
+
+/**
+ * 扫描 assets/langs/ 目录，读每个 JSON 里的 lang_name 字段构建选项列表。
+ * "Auto" 选项永远排在第一位，其余按 tag 字母序排列。
+ */
+private fun loadLangOptions(context: Context): List<LangOption> {
+    val fromAssets = runCatching {
+        context.assets.list("langs")
+            ?.filter { it.endsWith(".json") }
+            ?.mapNotNull { filename ->
+                val tag = filename.removeSuffix(".json")
+                val displayName = runCatching {
+                    val text = context.assets.open("langs/$filename")
+                        .bufferedReader().use { it.readText() }
+                    JSONObject(text).optString("lang_name", tag).ifBlank { tag }
+                }.getOrDefault(tag)
+                LangOption(displayName, tag)
+            }
+            ?.sortedBy { it.tag }
+    }.getOrNull().orEmpty()
+
+    return listOf(LangOption(I18n.t("lang_auto"), "auto")) + fromAssets
+}
+
+@Composable
+fun AppRoot(
+    irManager: ConsumerIrManager?,
+    viewModel: MainViewModel = viewModel()
+) {
+    val context = LocalContext.current
+    val navController = rememberNavController()
+    val uiState by viewModel.uiState.collectAsState()
+    val currentBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = currentBackStackEntry?.destination?.route ?: AppRoute.Home
+    val openLibraryPathPicker = rememberLibraryPathPicker(
+        onPathResolved = viewModel::setCurrentPath,
+        onPathError = {
+            Toast.makeText(context, I18n.t("toast_path_error"), Toast.LENGTH_SHORT).show()
+        }
+    )
+
+    var showHelpDialog by rememberSaveable { mutableStateOf(false) }
+    var showLangDialog by rememberSaveable { mutableStateOf(false) }
+    // 每次切换语言 +1，用来强制 key() 重建整棵 NavHost 子树，确保所有 I18n.t() 立即刷新
+    var langVersion by remember { mutableIntStateOf(0) }
+
+    PocketIrTheme(darkTheme = uiState.isDarkMode) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            StoragePermissionGate()
+
+            if (showHelpDialog) {
+                HelpDialog(onDismiss = { showHelpDialog = false })
+            }
+
+            if (showLangDialog) {
+                LanguageDialog(
+                    onDismiss = { showLangDialog = false },
+                    onApply = { tag ->
+                        context.getSharedPreferences("config", Context.MODE_PRIVATE)
+                            .edit()
+                            .putString("forced_language", tag)
+                            .apply()
+                        I18n.init(context)
+                        langVersion++          // 触发 NavHost 整棵子树重建
+                        showLangDialog = false
+                        Toast.makeText(context, I18n.t("toast_lang_changed"), Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+
+            Scaffold(
+                topBar = {
+                    RootTopBar(
+                        route = currentRoute,
+                        title = titleForRoute(currentRoute, uiState),
+                        isDarkMode = uiState.isDarkMode,
+                        canNavigateBack = navController.previousBackStackEntry != null,
+                        onThemeToggle = { viewModel.setDarkMode(!uiState.isDarkMode) },
+                        onPickPath = openLibraryPathPicker,
+                        onInfo = { showHelpDialog = true },
+                        onLang = { showLangDialog = true },
+                        onBack = { navController.popBackStack() }
+                    )
+                }
+            ) { padding ->
+                // key(langVersion) 确保切语言时整棵导航树重建，所有 I18n.t() 立即生效
+                key(langVersion) {
+                NavHost(
+                    navController = navController,
+                    startDestination = AppRoute.Home,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                ) {
+                    composable(AppRoute.Home) {
+                        HomeScreen(
+                            bookmarks = uiState.bookmarks,
+                            onDeviceSelect = { device ->
+                                viewModel.selectDevice(device)
+                                navController.navigateSingleTop(AppRoute.Panel)
+                            },
+                            onDelete = viewModel::deleteBookmark,
+                            currentPath = uiState.currentPath,
+                            onPickPath = openLibraryPathPicker,
+                            onBrowseLibrary = { navController.navigateSingleTop(AppRoute.Library) },
+                            onOpenEditor = { navController.navigateSingleTop(AppRoute.Editor) }
+                        )
+                    }
+
+                    composable(AppRoute.Library) {
+                        LibraryScreen(
+                            rootPath = uiState.currentPath,
+                            onDevicePicked = { device ->
+                                viewModel.saveBookmark(device)
+                                viewModel.selectDevice(device)
+                                navController.navigateSingleTop(AppRoute.Panel)
+                            }
+                        )
+                    }
+
+                    composable(AppRoute.Panel) {
+                        val selectedDevice = uiState.selectedDevice
+                        if (selectedDevice == null) {
+                            MissingSelection(
+                                onBackHome = {
+                                    navController.navigate(AppRoute.Home) {
+                                        popUpTo(AppRoute.Home) { inclusive = false }
+                                        launchSingleTop = true
+                                    }
+                                }
+                            )
+                        } else {
+                            PanelScreen(irManager = irManager, device = selectedDevice)
+                        }
+                    }
+
+                    composable(AppRoute.Editor) {
+                        NecEditor(
+                            onSave = { device ->
+                                viewModel.saveBookmark(device)
+                                viewModel.selectDevice(device)
+                                navController.navigateSingleTop(AppRoute.Panel)
+                            }
+                        )
+                    }
+                }
+                } // end key(langVersion)
+            }
+        }
+    }
+}
+
+private fun titleForRoute(route: String, uiState: MainUiState): String {
+    return when (route) {
+        AppRoute.Library -> I18n.t("ui_library_title")
+        AppRoute.Panel -> uiState.selectedDevice?.model ?: I18n.t("app_name")
+        AppRoute.Editor -> I18n.t("ui_editor_title")
+        else -> I18n.t("app_name")
+    }
+}
+
+private fun NavHostController.navigateSingleTop(route: String) {
+    navigate(route) {
+        launchSingleTop = true
+        restoreState = true
+    }
+}
+
+@Composable
+private fun rememberLibraryPathPicker(
+    onPathResolved: (String) -> Unit,
+    onPathError: () -> Unit
+): () -> Unit {
+    val context = LocalContext.current
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        resolveUriToPath(uri)?.let { path ->
+            onPathResolved(path)
+            Toast.makeText(context, I18n.t("toast_path_updated"), Toast.LENGTH_SHORT).show()
+        } ?: onPathError()
+    }
+
+    return remember(launcher) {
+        { launcher.launch(arrayOf("*/*")) }
+    }
+}
+
+private fun resolveUriToPath(uri: Uri): String? {
+    return runCatching {
+        val docId = DocumentsContract.getDocumentId(uri)
+        val split = docId.split(":")
+        if (split.size < 2 || !split[0].equals("primary", ignoreCase = true)) {
+            null
+        } else {
+            Environment.getExternalStorageDirectory().absolutePath + "/" + split[1]
+        }
+    }.getOrNull()
+}
+
+@Composable
+private fun StoragePermissionGate() {
+    val context = LocalContext.current
+    var showPermissionDialog by rememberSaveable {
+        mutableStateOf(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager())
+    }
+
+    if (showPermissionDialog) {
+        PermissionDialog(
+            context = context,
+            onDismiss = { showPermissionDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun HelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(I18n.t("dialog_help_title")) },
+        text = { Text(I18n.t("dialog_help_msg")) },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text(I18n.t("btn_i_know"))
+            }
+        }
+    )
+}
+
+// ---------------------------------------------------------------------------
+// 语言选择弹窗 — 动态枚举 assets/langs/ 下的所有 JSON
+// ---------------------------------------------------------------------------
+@Composable
+private fun LanguageDialog(
+    onDismiss: () -> Unit,
+    onApply: (tag: String) -> Unit
+) {
+    val context = LocalContext.current
+
+    val currentTag = remember {
+        context.getSharedPreferences("config", Context.MODE_PRIVATE)
+            .getString("forced_language", "auto") ?: "auto"
+    }
+
+    val options = remember { loadLangOptions(context) }
+    var selected by remember { mutableStateOf(currentTag) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(I18n.t("dialog_lang_title")) },
+        text = {
+            Column(modifier = Modifier.selectableGroup()) {
+                options.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .selectable(
+                                selected = (option.tag == selected),
+                                onClick = { selected = option.tag },
+                                role = Role.RadioButton
+                            ),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = (option.tag == selected),
+                            onClick = null  // 由 Row 的 selectable 统一处理
+                        )
+                        Text(
+                            text = option.displayName,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.padding(start = 12.dp)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onApply(selected) }) {
+                Text(I18n.t("btn_apply"))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(I18n.t("btn_cancel"))
+            }
+        }
+    )
+}
+
+// ---------------------------------------------------------------------------
+// TopBar
+// ---------------------------------------------------------------------------
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RootTopBar(
+    route: String,
+    title: String,
+    isDarkMode: Boolean,
+    canNavigateBack: Boolean,
+    onThemeToggle: () -> Unit,
+    onPickPath: () -> Unit,
+    onInfo: () -> Unit,
+    onLang: () -> Unit,
+    onBack: () -> Unit
+) {
+    TopAppBar(
+        title = { Text(title) },
+        navigationIcon = {
+            if (canNavigateBack && route != AppRoute.Home) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = I18n.t("btn_back"))
+                }
+            } else {
+                IconButton(onClick = onPickPath) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = I18n.t("action_folder"))
+                }
+            }
+        },
+        actions = {
+            if (route == AppRoute.Home) {
+                IconButton(onClick = onLang) {
+                    Icon(Icons.Default.Language, contentDescription = I18n.t("dialog_lang_title"))
+                }
+                IconButton(onClick = onInfo) {
+                    Icon(Icons.Default.Info, contentDescription = I18n.t("action_info"))
+                }
+            }
+            IconButton(onClick = onThemeToggle) {
+                Icon(
+                    imageVector = if (isDarkMode) Icons.Default.LightMode else Icons.Default.DarkMode,
+                    contentDescription = I18n.t("ui_switch_theme")
+                )
+            }
+        }
+    )
+}
+
+@Composable
+private fun MissingSelection(onBackHome: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Button(onClick = onBackHome) {
+            Text(I18n.t("btn_back"))
+        }
+    }
+}
+
+@Composable
+private fun PermissionDialog(context: Context, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text(I18n.t("dialog_perm_title")) },
+        text = { Text(I18n.t("dialog_perm_msg")) },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onDismiss()
+                    try {
+                        context.startActivity(
+                            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                data = Uri.parse("package:${context.packageName}")
+                            }
+                        )
+                    } catch (_: Exception) {
+                        context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                    }
+                }
+            ) {
+                Text(I18n.t("btn_grant"))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { (context as? Activity)?.finish() }) {
+                Text(I18n.t("btn_exit"))
+            }
+        }
+    )
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\MainActivity.kt
+============================================================
+
+package com.xiao.pocketir.ui
+
+import android.content.Context
+import android.hardware.ConsumerIrManager
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import com.xiao.pocketir.i18n.I18n
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        I18n.init(applicationContext)
+
+        val irManager = getSystemService(Context.CONSUMER_IR_SERVICE) as? ConsumerIrManager
+        setContent {
+            AppRoot(irManager = irManager)
+        }
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\MainUiState.kt
+============================================================
+
+package com.xiao.pocketir.ui
+
+import com.xiao.pocketir.data.SettingsRepository
+import com.xiao.pocketir.model.DeviceMeta
+
+data class MainUiState(
+    val currentPath: String = SettingsRepository.defaultLibraryPath(),
+    val bookmarks: List<DeviceMeta> = emptyList(),
+    val selectedDevice: DeviceMeta? = null,
+    val isDarkMode: Boolean = false,
+    val isBookmarkLoading: Boolean = true
+)
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\MainViewModel.kt
+============================================================
+
+package com.xiao.pocketir.ui
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.xiao.pocketir.data.BookmarkManager
+import com.xiao.pocketir.data.SettingsRepository
+import com.xiao.pocketir.model.DeviceMeta
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val appContext = application.applicationContext
+    private val settingsRepository = SettingsRepository(appContext)
+    private val bookmarks = MutableStateFlow<List<DeviceMeta>>(emptyList())
+    private val selectedDevice = MutableStateFlow<DeviceMeta?>(null)
+    private val isBookmarkLoading = MutableStateFlow(true)
+
+    val uiState = combine(
+        settingsRepository.settings,
+        bookmarks,
+        selectedDevice,
+        isBookmarkLoading
+    ) { settings, savedRemotes, selected, loading ->
+        MainUiState(
+            currentPath = settings.currentPath,
+            bookmarks = savedRemotes,
+            selectedDevice = selected,
+            isDarkMode = settings.isDarkMode,
+            isBookmarkLoading = loading
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = MainUiState()
+    )
+
+    init {
+        refreshBookmarks()
+    }
+
+    fun setDarkMode(isDarkMode: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setDarkMode(isDarkMode)
+        }
+    }
+
+    fun setCurrentPath(path: String) {
+        viewModelScope.launch {
+            settingsRepository.setCurrentPath(path)
+        }
+    }
+
+    fun selectDevice(device: DeviceMeta) {
+        selectedDevice.value = device
+    }
+
+    fun clearSelectedDevice() {
+        selectedDevice.value = null
+    }
+
+    fun saveBookmark(device: DeviceMeta) {
+        viewModelScope.launch {
+            val updated = withContext(Dispatchers.IO) {
+                BookmarkManager.upsert(appContext, device)
+            }
+            bookmarks.value = updated
+        }
+    }
+
+    fun deleteBookmark(device: DeviceMeta) {
+        viewModelScope.launch {
+            val updated = withContext(Dispatchers.IO) {
+                BookmarkManager.remove(appContext, device)
+            }
+            bookmarks.value = updated
+            selectedDevice.update { selected ->
+                if (selected != null && sameDevice(selected, device)) null else selected
+            }
+        }
+    }
+
+    private fun refreshBookmarks() {
+        viewModelScope.launch {
+            isBookmarkLoading.value = true
+            bookmarks.value = withContext(Dispatchers.IO) {
+                BookmarkManager.load(appContext)
+            }
+            isBookmarkLoading.value = false
+        }
+    }
+
+    private fun sameDevice(left: DeviceMeta, right: DeviceMeta): Boolean {
+        return left.category == right.category &&
+            left.brand == right.brand &&
+            left.model == right.model &&
+            left.sourcePath == right.sourcePath
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\components\SkeuoButton.kt
+============================================================
+
+package com.xiao.pocketir.ui.components
+
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+
+@Composable
+fun SkeuoButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    isPower: Boolean = false
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier.fillMaxWidth().aspectRatio(1f),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (isPower) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer,
+            contentColor = if (isPower) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
+        )
+    ) {
+        Text(text = label)
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\panels\GridPanel.kt
+============================================================
+
+package com.xiao.pocketir.ui.panels
+
+import android.content.Context
+import android.hardware.ConsumerIrManager
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.xiao.pocketir.data.IrRepository
+import com.xiao.pocketir.i18n.I18n
+import com.xiao.pocketir.ir.HapticEngine
+import com.xiao.pocketir.ir.IrTransmitter
+import com.xiao.pocketir.model.DeviceMeta
+import com.xiao.pocketir.model.FlipperCommand
+import com.xiao.pocketir.ui.components.SkeuoButton
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.Locale
+
+@Composable
+fun GridPanel(
+    irManager: ConsumerIrManager?,
+    device: DeviceMeta
+) {
+    val context = LocalContext.current
+    var commands by remember(device) { mutableStateOf<List<FlipperCommand>>(emptyList()) }
+    var isLoading by remember(device) { mutableStateOf(true) }
+
+    LaunchedEffect(device) {
+        isLoading = true
+        commands = withContext(Dispatchers.IO) { IrRepository.getCommands(device) }
+        isLoading = false
+    }
+
+    if (isLoading) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+        return
+    }
+
+    if (commands.isEmpty()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = I18n.t("panel_no_commands"),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+        return
+    }
+
+    val layout = remember(commands) { PanelCommandLayout.from(commands) }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (layout.powerCommands.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                layout.powerCommands.forEach { indexed ->
+                    SkeuoButton(
+                        label = indexed.command.powerLabel(),
+                        onClick = {
+                            HapticEngine.heavyTap(context)
+                            IrTransmitter.transmit(context, irManager, indexed.command)
+                        },
+                        isPower = true,
+                        modifier = Modifier.size(72.dp)
+                    )
+                }
+            }
+        }
+
+        if (layout.hasControlRow) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                layout.leftRocker?.let { rocker ->
+                    Rocker(
+                        context = context,
+                        irManager = irManager,
+                        label = rocker.label(),
+                        upCommand = rocker.up?.command,
+                        downCommand = rocker.down?.command
+                    )
+                } ?: Spacer(modifier = Modifier.width(72.dp))
+
+                if (layout.hasDPad) {
+                    DPad(
+                        context = context,
+                        irManager = irManager,
+                        upCommand = layout.upCommand?.command,
+                        downCommand = layout.downCommand?.command,
+                        leftCommand = layout.leftCommand?.command,
+                        rightCommand = layout.rightCommand?.command,
+                        enterCommand = layout.enterCommand?.command
+                    )
+                } else {
+                    Spacer(modifier = Modifier.width(176.dp))
+                }
+
+                layout.channelRocker?.let { rocker ->
+                    Rocker(
+                        context = context,
+                        irManager = irManager,
+                        label = rocker.label(),
+                        upCommand = rocker.up?.command,
+                        downCommand = rocker.down?.command
+                    )
+                } ?: Spacer(modifier = Modifier.width(72.dp))
+            }
+        }
+
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(3),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentPadding = PaddingValues(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(layout.gridCommands, key = { it.index }) { indexed ->
+                SkeuoButton(
+                    label = indexed.command.name,
+                    onClick = {
+                        HapticEngine.lightTap(context)
+                        IrTransmitter.transmit(context, irManager, indexed.command)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun Rocker(
+    context: Context,
+    irManager: ConsumerIrManager?,
+    label: String,
+    upCommand: FlipperCommand?,
+    downCommand: FlipperCommand?
+) {
+    Surface(
+        shape = RoundedCornerShape(32.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier
+            .width(72.dp)
+            .height(144.dp)
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            IconButton(
+                onClick = { upCommand?.transmitLight(context, irManager) },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                enabled = upCommand != null
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = I18n.t("panel_cd_increase", label)
+                )
+            }
+
+            Text(
+                text = label,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            )
+
+            IconButton(
+                onClick = { downCommand?.transmitLight(context, irManager) },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                enabled = downCommand != null
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Remove,
+                    contentDescription = I18n.t("panel_cd_decrease", label)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DPad(
+    context: Context,
+    irManager: ConsumerIrManager?,
+    upCommand: FlipperCommand?,
+    downCommand: FlipperCommand?,
+    leftCommand: FlipperCommand?,
+    rightCommand: FlipperCommand?,
+    enterCommand: FlipperCommand?
+) {
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.size(176.dp)
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            upCommand?.let { command ->
+                IconButton(
+                    onClick = { command.transmitLight(context, irManager) },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(4.dp)
+                        .size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowUp,
+                        contentDescription = I18n.t("panel_cd_up"),
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+
+            downCommand?.let { command ->
+                IconButton(
+                    onClick = { command.transmitLight(context, irManager) },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(4.dp)
+                        .size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowDown,
+                        contentDescription = I18n.t("panel_cd_down"),
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+
+            leftCommand?.let { command ->
+                IconButton(
+                    onClick = { command.transmitLight(context, irManager) },
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(4.dp)
+                        .size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                        contentDescription = I18n.t("panel_cd_left"),
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+
+            rightCommand?.let { command ->
+                IconButton(
+                    onClick = { command.transmitLight(context, irManager) },
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(4.dp)
+                        .size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = I18n.t("panel_cd_right"),
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+
+            enterCommand?.let { command ->
+                FilledIconButton(
+                    onClick = {
+                        HapticEngine.heavyTap(context)
+                        IrTransmitter.transmit(context, irManager, command)
+                    },
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(64.dp)
+                ) {
+                    Text(I18n.t("panel_btn_ok"))
+                }
+            }
+        }
+    }
+}
+
+private data class IndexedCommand(
+    val index: Int,
+    val command: FlipperCommand
+)
+
+private data class ControlRocker(
+    val kind: RockerKind,
+    val up: IndexedCommand?,
+    val down: IndexedCommand?
+) {
+    fun label(): String {
+        return when (kind) {
+            RockerKind.VOLUME -> I18n.t("panel_rocker_vol")
+            RockerKind.TEMPERATURE -> I18n.t("panel_rocker_temp")
+            RockerKind.CHANNEL -> I18n.t("panel_rocker_ch")
+        }
+    }
+}
+
+private enum class RockerKind {
+    VOLUME,
+    TEMPERATURE,
+    CHANNEL
+}
+
+private data class PanelCommandLayout(
+    val powerCommands: List<IndexedCommand>,
+    val leftRocker: ControlRocker?,
+    val channelRocker: ControlRocker?,
+    val upCommand: IndexedCommand?,
+    val downCommand: IndexedCommand?,
+    val leftCommand: IndexedCommand?,
+    val rightCommand: IndexedCommand?,
+    val enterCommand: IndexedCommand?,
+    val gridCommands: List<IndexedCommand>
+) {
+    val hasDPad: Boolean
+        get() = upCommand != null ||
+            downCommand != null ||
+            leftCommand != null ||
+            rightCommand != null ||
+            enterCommand != null
+
+    val hasControlRow: Boolean
+        get() = leftRocker != null || channelRocker != null || hasDPad
+
+    companion object {
+        fun from(commands: List<FlipperCommand>): PanelCommandLayout {
+            val indexed = commands.mapIndexed { index, command -> IndexedCommand(index, command) }
+            val bySlot = indexed.groupBy { classifyCommand(it.command.name) }
+
+            val volumeRocker = rocker(
+                kind = RockerKind.VOLUME,
+                up = bySlot[CommandSlot.VOLUME_UP]?.firstOrNull(),
+                down = bySlot[CommandSlot.VOLUME_DOWN]?.firstOrNull()
+            )
+            val temperatureRocker = rocker(
+                kind = RockerKind.TEMPERATURE,
+                up = bySlot[CommandSlot.TEMP_UP]?.firstOrNull(),
+                down = bySlot[CommandSlot.TEMP_DOWN]?.firstOrNull()
+            )
+            val channelRocker = rocker(
+                kind = RockerKind.CHANNEL,
+                up = bySlot[CommandSlot.CHANNEL_UP]?.firstOrNull(),
+                down = bySlot[CommandSlot.CHANNEL_DOWN]?.firstOrNull()
+            )
+
+            val absorbed = linkedSetOf<Int>()
+            val leftRocker = volumeRocker ?: temperatureRocker
+
+            bySlot[CommandSlot.POWER].orEmpty().forEach { absorbed += it.index }
+            leftRocker?.up?.let { absorbed += it.index }
+            leftRocker?.down?.let { absorbed += it.index }
+            channelRocker?.up?.let { absorbed += it.index }
+            channelRocker?.down?.let { absorbed += it.index }
+
+            val up = bySlot[CommandSlot.UP]?.firstOrNull()
+            val down = bySlot[CommandSlot.DOWN]?.firstOrNull()
+            val left = bySlot[CommandSlot.LEFT]?.firstOrNull()
+            val right = bySlot[CommandSlot.RIGHT]?.firstOrNull()
+            val enter = bySlot[CommandSlot.ENTER]?.firstOrNull()
+            listOfNotNull(up, down, left, right, enter).forEach { absorbed += it.index }
+
+            return PanelCommandLayout(
+                powerCommands = bySlot[CommandSlot.POWER].orEmpty(),
+                leftRocker = leftRocker,
+                channelRocker = channelRocker,
+                upCommand = up,
+                downCommand = down,
+                leftCommand = left,
+                rightCommand = right,
+                enterCommand = enter,
+                gridCommands = indexed.filterNot { it.index in absorbed }
+            )
+        }
+
+        private fun rocker(
+            kind: RockerKind,
+            up: IndexedCommand?,
+            down: IndexedCommand?
+        ): ControlRocker? {
+            return if (up != null || down != null) ControlRocker(kind, up, down) else null
+        }
+    }
+}
+
+private enum class CommandSlot {
+    POWER,
+    UP,
+    DOWN,
+    LEFT,
+    RIGHT,
+    ENTER,
+    VOLUME_UP,
+    VOLUME_DOWN,
+    CHANNEL_UP,
+    CHANNEL_DOWN,
+    TEMP_UP,
+    TEMP_DOWN
+}
+
+private fun classifyCommand(name: String): CommandSlot? {
+    val key = name.commandKey()
+    return when {
+        key in POWER_KEYS -> CommandSlot.POWER
+        key in VOLUME_UP_KEYS -> CommandSlot.VOLUME_UP
+        key in VOLUME_DOWN_KEYS -> CommandSlot.VOLUME_DOWN
+        key in CHANNEL_UP_KEYS -> CommandSlot.CHANNEL_UP
+        key in CHANNEL_DOWN_KEYS -> CommandSlot.CHANNEL_DOWN
+        key in TEMP_UP_KEYS -> CommandSlot.TEMP_UP
+        key in TEMP_DOWN_KEYS -> CommandSlot.TEMP_DOWN
+        key in UP_KEYS -> CommandSlot.UP
+        key in DOWN_KEYS -> CommandSlot.DOWN
+        key in LEFT_KEYS -> CommandSlot.LEFT
+        key in RIGHT_KEYS -> CommandSlot.RIGHT
+        key in ENTER_KEYS -> CommandSlot.ENTER
+        else -> null
+    }
+}
+
+private fun FlipperCommand.powerLabel(): String {
+    return when (name.commandKey()) {
+        "on", "poweron", "turnon" -> I18n.t("label_power_on")
+        "off", "poweroff", "turnoff" -> I18n.t("label_power_off")
+        else -> I18n.t("label_power")
+    }
+}
+
+private fun FlipperCommand.transmitLight(context: Context, irManager: ConsumerIrManager?) {
+    HapticEngine.lightTap(context)
+    IrTransmitter.transmit(context, irManager, this)
+}
+
+private fun String.commandKey(): String {
+    val trimmed = trim()
+    if (trimmed == "⏻") return "power"
+
+    return trimmed
+        .lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9+]+"), "")
+}
+
+private val POWER_KEYS = setOf(
+    "power",
+    "pwr",
+    "standby",
+    "onoff",
+    "poweronoff",
+    "togglepower",
+    "on",
+    "off",
+    "poweron",
+    "poweroff",
+    "turnon",
+    "turnoff"
+)
+
+private val VOLUME_UP_KEYS = setOf("volumeup", "volume+", "volup", "vol+", "vup", "v+")
+private val VOLUME_DOWN_KEYS = setOf("volumedown", "volume-", "voldown", "voldn", "vol-", "vdown", "v-")
+private val CHANNEL_UP_KEYS = setOf("channelup", "channel+", "chup", "chnext", "ch+", "programup", "prgup")
+private val CHANNEL_DOWN_KEYS = setOf("channeldown", "channel-", "chdown", "chprev", "ch-", "programdown", "prgdown")
+private val TEMP_UP_KEYS = setOf("tempup", "temperatureup", "temp+", "temperature+", "t+", "warmer")
+private val TEMP_DOWN_KEYS = setOf("tempdown", "temperaturedown", "temp-", "temperature-", "t-", "cooler")
+private val UP_KEYS = setOf("up", "uparrow", "top")
+private val DOWN_KEYS = setOf("down", "downarrow", "bottom", "dwn")
+private val LEFT_KEYS = setOf("left", "leftarrow", "lft")
+private val RIGHT_KEYS = setOf("right", "rightarrow", "rgt")
+private val ENTER_KEYS = setOf("ok", "enter", "select", "confirm")
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\screens\HomeScreen.kt
+============================================================
+
+package com.xiao.pocketir.ui.screens
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.xiao.pocketir.i18n.I18n
+import com.xiao.pocketir.model.DeviceMeta
+import com.xiao.pocketir.ui.theme.ConsoleBackground
+import com.xiao.pocketir.ui.theme.ConsoleGreen
+import com.xiao.pocketir.ui.theme.OrangeStatus
+
+@Composable
+fun HomeScreen(
+    bookmarks: List<DeviceMeta>,
+    onDeviceSelect: (DeviceMeta) -> Unit,
+    onDelete: (DeviceMeta) -> Unit,
+    currentPath: String,
+    onPickPath: () -> Unit,
+    onBrowseLibrary: () -> Unit,
+    onOpenEditor: () -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 20.dp, top = 20.dp, end = 20.dp, bottom = 96.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        item {
+            LibraryStatusCard(
+                currentPath = currentPath,
+                savedCount = bookmarks.size,
+                onPickPath = onPickPath
+            )
+        }
+
+        item {
+            QuickActionsCard(
+                onBrowseLibrary = onBrowseLibrary,
+                onOpenEditor = onOpenEditor
+            )
+        }
+
+        item {
+            ConsoleCard(savedCount = bookmarks.size)
+        }
+
+        item {
+            Text(
+                text = I18n.t("ui_saved_remotes_title"),
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.72f)
+            )
+        }
+
+        if (bookmarks.isEmpty()) {
+            item {
+                EmptyRemoteState(
+                    onBrowseLibrary = onBrowseLibrary,
+                    onOpenEditor = onOpenEditor
+                )
+            }
+        } else {
+            items(bookmarks) { device ->
+                RemoteCard(
+                    device = device,
+                    onDeviceSelect = onDeviceSelect,
+                    onDelete = onDelete
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibraryStatusCard(
+    currentPath: String,
+    savedCount: Int,
+    onPickPath: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Text(
+                text = I18n.t("ui_status_ready"),
+                color = OrangeStatus,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = I18n.t("ui_status_summary", savedCount),
+                modifier = Modifier.padding(top = 12.dp),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 16.dp),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+            )
+
+            Text(
+                text = I18n.t("ui_path_label"),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+            )
+            Text(
+                text = currentPath,
+                fontStyle = FontStyle.Italic,
+                modifier = Modifier.padding(top = 4.dp),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Button(onClick = onPickPath) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(I18n.t("action_folder"))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickActionsCard(
+    onBrowseLibrary: () -> Unit,
+    onOpenEditor: () -> Unit
+) {
+    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(text = I18n.t("ui_advanced_title"), fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(12.dp))
+            FilledTonalButton(
+                onClick = onBrowseLibrary,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Search, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(I18n.t("ui_action_scan_library"))
+            }
+            FilledTonalButton(
+                onClick = onOpenEditor,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Code, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(I18n.t("ui_action_nec_editor"))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConsoleCard(savedCount: Int) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(120.dp),
+        colors = CardDefaults.cardColors(containerColor = ConsoleBackground)
+    ) {
+        Text(
+            text = I18n.t("ui_console_text", savedCount),
+            color = ConsoleGreen,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp)
+        )
+    }
+}
+
+@Composable
+private fun EmptyRemoteState(
+    onBrowseLibrary: () -> Unit,
+    onOpenEditor: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = I18n.t("ui_bookmarks_empty"),
+            fontSize = 18.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.clickable(onClick = onBrowseLibrary),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = I18n.t("ui_add_hint"), fontSize = 14.sp)
+            Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.clickable(onClick = onOpenEditor),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = I18n.t("ui_manual_hint"), fontSize = 14.sp)
+            Icon(Icons.Default.Code, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+@Composable
+private fun RemoteCard(
+    device: DeviceMeta,
+    onDeviceSelect: (DeviceMeta) -> Unit,
+    onDelete: (DeviceMeta) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onDeviceSelect(device) },
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+    ) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = device.model,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Text(
+                    text = "${device.brand} / ${device.category}",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                )
+            }
+            IconButton(onClick = { onDelete(device) }) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = I18n.t("action_delete"),
+                    tint = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\screens\LibraryScreen.kt
+============================================================
+
+package com.xiao.pocketir.ui.screens
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.xiao.pocketir.data.IrRepository
+import com.xiao.pocketir.i18n.I18n
+import com.xiao.pocketir.model.DeviceMeta
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+
+@Composable
+fun LibraryScreen(
+    rootPath: String,
+    onDevicePicked: (DeviceMeta) -> Unit
+) {
+    val library = remember(rootPath) { IrRepository.open(rootPath) }
+    var searchText by remember { mutableStateOf("") }
+    var deviceList by remember(rootPath) { mutableStateOf<List<DeviceMeta>>(emptyList()) }
+    var isLoading by remember(rootPath) { mutableStateOf(true) }
+
+    LaunchedEffect(rootPath) {
+        isLoading = true
+        library.ensureIndexed()
+        deviceList = withContext(Dispatchers.IO) { library.getDeviceList() }
+        isLoading = false
+    }
+
+    LaunchedEffect(rootPath, searchText, isLoading) {
+        if (isLoading) return@LaunchedEffect
+        delay(300)
+        deviceList = withContext(Dispatchers.IO) { library.search(searchText) }
+    }
+
+    if (isLoading) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+        }
+        return
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = searchText,
+            onValueChange = { searchText = it },
+            label = { Text(I18n.t("ui_search_hint")) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        )
+
+        if (deviceList.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                Text(
+                    text = I18n.t("ui_empty_library"),
+                    modifier = Modifier.align(Alignment.Center),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+            return
+        }
+
+        LazyColumn(
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(deviceList) { device ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onDevicePicked(device) }
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(text = device.model, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "${device.brand} / ${device.category}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\screens\NecEditor.kt
+============================================================
+
+package com.xiao.pocketir.ui.screens
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.xiao.pocketir.i18n.I18n
+import com.xiao.pocketir.ir.IrDecoder
+import com.xiao.pocketir.model.DeviceMeta
+import com.xiao.pocketir.model.DeviceType
+import com.xiao.pocketir.model.FlipperCommand
+import com.xiao.pocketir.model.FlipperSignalType
+
+@Composable
+fun NecEditor(
+    onSave: (DeviceMeta) -> Unit
+) {
+    var remoteName by remember { mutableStateOf("") }
+    var buttonName by remember { mutableStateOf(I18n.t("editor_default_custom")) }
+    var protocol by remember { mutableStateOf("NEC") }
+    var address by remember { mutableStateOf("") }
+    var command by remember { mutableStateOf("") }
+
+    val normalizedAddress = remember(address) { IrDecoder.normalizeFlipperHex(address) }
+    val normalizedCommand = remember(command) { IrDecoder.normalizeFlipperHex(command) }
+    val canSave = protocol.isNotBlank() && normalizedAddress != null && normalizedCommand != null
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = I18n.t("ui_editor_intro"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        OutlinedTextField(
+            value = remoteName,
+            onValueChange = { remoteName = it },
+            label = { Text(I18n.t("ui_editor_remote_name")) },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = buttonName,
+            onValueChange = { buttonName = it },
+            label = { Text(I18n.t("ui_editor_button_name")) },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = protocol,
+            onValueChange = { protocol = it.uppercase() },
+            label = { Text(I18n.t("ui_editor_protocol")) },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = address,
+            onValueChange = { address = it },
+            label = { Text(I18n.t("ui_editor_address")) },
+            isError = address.isNotBlank() && normalizedAddress == null,
+            supportingText = {
+                Text(
+                    when {
+                        normalizedAddress != null -> normalizedAddress
+                        address.isNotBlank() -> I18n.t("error_invalid_hex")
+                        else -> I18n.t("ui_editor_hex_hint")
+                    }
+                )
+            },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = command,
+            onValueChange = { command = it },
+            label = { Text(I18n.t("ui_editor_command")) },
+            isError = command.isNotBlank() && normalizedCommand == null,
+            supportingText = {
+                Text(
+                    when {
+                        normalizedCommand != null -> normalizedCommand
+                        command.isNotBlank() -> I18n.t("error_invalid_hex")
+                        else -> I18n.t("ui_editor_hex_hint")
+                    }
+                )
+            },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Button(
+            onClick = {
+                val finalAddress = normalizedAddress ?: return@Button
+                val finalCommand = normalizedCommand ?: return@Button
+                val finalButtonName = buttonName.trim().ifBlank { "Custom" }
+                val finalRemoteName = remoteName.trim().ifBlank { finalButtonName }
+                onSave(
+                    DeviceMeta(
+                        category = I18n.t("editor_default_custom"),
+                        brand = I18n.t("editor_default_manual"),
+                        model = finalRemoteName,
+                        sourcePath = buildCustomSourcePath(finalRemoteName, finalButtonName),
+                        type = DeviceType.GENERIC,
+                        embeddedCommands = listOf(
+                            FlipperCommand(
+                                name = finalButtonName,
+                                type = FlipperSignalType.PARSED,
+                                protocol = protocol.trim().ifBlank { "NEC" },
+                                address = finalAddress,
+                                command = finalCommand
+                            )
+                        )
+                    )
+                )
+            },
+            enabled = canSave,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(I18n.t("btn_save"))
+        }
+    }
+}
+
+private fun buildCustomSourcePath(remoteName: String, buttonName: String): String {
+    val seed = "$remoteName-$buttonName"
+        .lowercase()
+        .replace(Regex("[^a-z0-9]+"), "-")
+        .trim('-')
+        .ifBlank { "custom-nec" }
+    val fingerprint = ("$remoteName|$buttonName").hashCode().toUInt().toString(16)
+    return "bookmark://custom/$seed-$fingerprint"
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\screens\PanelScreen.kt
+============================================================
+
+package com.xiao.pocketir.ui.screens
+
+import android.hardware.ConsumerIrManager
+import androidx.compose.runtime.Composable
+import com.xiao.pocketir.model.DeviceMeta
+import com.xiao.pocketir.ui.panels.GridPanel
+
+@Composable
+fun PanelScreen(
+    irManager: ConsumerIrManager?,
+    device: DeviceMeta
+) {
+    GridPanel(irManager = irManager, device = device)
+}
+
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\theme\Color.kt
+============================================================
+
+package com.xiao.pocketir.ui.theme
+
+import androidx.compose.ui.graphics.Color
+
+val LightPrimary = Color(0xFF000000)
+val LightPrimaryVariant = Color(0xFF6200EE)
+val LightBackground = Color(0xFFFAFAFA)
+val LightSurface = Color(0xFFFFFFFF)
+val LightOnPrimary = Color(0xFFFFFFFF)
+val LightOnSurface = Color(0xFF1A1C1E)
+val LightOutline = Color(0x66888888)
+
+val DarkPrimary = Color(0xFFD0BCFF)
+val DarkPrimaryVariant = Color(0xFFCCC2DC)
+val DarkBackground = Color(0xFF1C1B1F)
+val DarkSurface = Color(0xFF1C1B1F)
+val DarkOnSurface = Color(0xFFE6E1E5)
+val DarkError = Color(0xFFF2B8B5)
+
+val ConsoleBackground = Color(0xFF1E1E1E)
+val ConsoleGreen = Color(0xFF4AF626)
+val OrangeStatus = Color(0xFFFF9800)
+
+val PowerRedLight = Color(0xFFC62828) // 亮色模式：深红
+val PowerRedDark = Color(0xFF8E0000)  // 暗色模式：更深邃的红
+val TextWhite = Color(0xFFFFFFFF)     // 纯白文字
+
+============================================================
+File: app\src\main\java\com\xiao\pocketir\ui\theme\Theme.kt
+============================================================
+
+package com.xiao.pocketir.ui.theme
+
+import android.app.Activity
+import android.graphics.Color as AndroidColor
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+
+private val LightColorScheme = lightColorScheme(
+    primary = LightPrimary,
+    primaryContainer = LightSurface,
+    onPrimary = LightOnPrimary,
+    onPrimaryContainer = LightOnSurface,
+    secondary = LightPrimaryVariant,
+    background = LightBackground,
+    surface = LightSurface,
+    surfaceVariant = LightSurface,
+    onSurface = LightOnSurface,
+    onSurfaceVariant = LightOnSurface.copy(alpha = 0.7f),
+    outline = LightOutline,
+    // === 新增：注入电源键的专属颜色 ===
+    errorContainer = PowerRedLight,
+    onErrorContainer = TextWhite
+)
+
+private val DarkColorScheme = darkColorScheme(
+    primary = DarkPrimary,
+    primaryContainer = Color(0xFF2B2930),
+    onPrimary = Color(0xFF381E72),
+    onPrimaryContainer = DarkOnSurface,
+    secondary = DarkPrimaryVariant,
+    background = DarkBackground,
+    surface = DarkSurface,
+    surfaceVariant = Color(0xFF2B2930),
+    onSurface = DarkOnSurface,
+    onSurfaceVariant = DarkOnSurface.copy(alpha = 0.72f),
+    error = DarkError,
+    outline = Color(0x66888888),
+    // === 新增：注入电源键的专属颜色 ===
+    errorContainer = PowerRedDark,
+    onErrorContainer = TextWhite
+)
+
+@Composable
+fun PocketIrTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit
+) {
+    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
+    val view = LocalView.current
+
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as Activity).window
+            window.statusBarColor = if (darkTheme) AndroidColor.BLACK else AndroidColor.parseColor("#FAFAFA")
+            window.navigationBarColor = if (darkTheme) AndroidColor.BLACK else AndroidColor.parseColor("#FAFAFA")
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
+            WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = !darkTheme
+        }
+    }
+
+    MaterialTheme(
+        colorScheme = colorScheme,
+        content = content
+    )
+}
+
+============================================================
+File: app\src\main\res\drawable\ic_launcher_foreground.xml
+============================================================
+
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path 
+        android:strokeColor="#ffba6c" 
+        android:strokeWidth="5" 
+        android:strokeLineCap="round" 
+        android:fillColor="#00000000" 
+        android:pathData="M31,29 c16,-10 30,-10 46,0"/>
+    
+    <path 
+        android:strokeColor="#ffba6c" 
+        android:strokeWidth="5" 
+        android:strokeLineCap="round" 
+        android:fillColor="#00000000" 
+        android:pathData="M39,39 c10,-6 20,-6 30,0"/>
+    
+    <path 
+        android:strokeColor="#ffba6c" 
+        android:strokeWidth="5" 
+        android:strokeLineCap="round" 
+        android:fillColor="#00000000" 
+        android:pathData="M47,49 c4,-2.5 10,-2.5 14,0"/>
+
+    <path 
+        android:fillColor="#2196F3" 
+        android:pathData="M40,56 h28 c3.3,0 6,2.7 6,6 v32 c0,3.3 -2.7,6 -6,6 h-28 c-3.3,0 -6,-2.7 -6,-6 v-32 c0,-3.3 2.7,-6 6,-6 z"/>
+
+    <path 
+        android:fillColor="#e72121" 
+        android:pathData="M41,65 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0 z"/>
+</vector>
+
+============================================================
+File: app\src\main\res\mipmap-anydpi-v26\ic_launcher.xml
+============================================================
+
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
+
+============================================================
+File: app\src\main\res\mipmap-anydpi-v26\ic_launcher_round.xml
+============================================================
+
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
+
+============================================================
+File: app\src\main\res\values\colors.xml
+============================================================
+
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="black">#FF000000</color>
+    <color name="ic_launcher_background">#1A1C1E</color>
+    <color name="purple_500">#6200EE</color>
+    <color name="purple_700">#3700B3</color>
+    <color name="teal_200">#03DAC5</color>
+</resources>
+
+
+============================================================
+File: app\src\main\res\values\strings.xml
+============================================================
+
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PocketIR</string>
+</resources>
+
+
+============================================================
+File: app\src\main\res\values\themes.xml
+============================================================
+
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:statusBarColor">#FAFAFA</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">#FAFAFA</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>
+
+
+============================================================
+File: app\src\main\res\values-zh-rCN\strings.xml
+============================================================
+
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">口袋红外</string>
+</resources>
