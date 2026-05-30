@@ -42,11 +42,14 @@ Ensure the Android SDK is installed, then run the following in the project root:
 ```
 *Note: A generic `release.jks` has been provided for ease of compilation.*
 
-### Database Preparation
-To load the latest IR codes:
-1. Clone the `Flipper-IRDB` repository.
-2. Run the provided Python script `python build_ir_database.py` in the root directory.
-3. Move the generated `pocket_ir.db` to your Android's external storage and pick it from within the app.
+### ⚠️ Important: Database Preparation (DIY Required)
+**Please note: To avoid bloat and respect open-source licenses, PocketIR does NOT come with a pre-built infrared database.** You must generate your own `.db` file using the provided script.
+
+1. Clone or download a Flipper IR database (e.g., [Lucaslhm/Flipper-IRDB](https://github.com/Lucaslhm/Flipper-IRDB)).
+2. Place `build_ir_database.py` in the root of the downloaded IR database directory.
+3. Run `python build_ir_database.py` in your terminal.
+4. A `pocket_ir.db` file will be generated. Copy this file to your Android device's external storage.
+5. Open PocketIR, grant file access permissions, and select the `pocket_ir.db` file from your local storage to load your library.
 
 ---
 
@@ -83,10 +86,14 @@ To load the latest IR codes:
 ```
 *注：项目已内置了一个默认的 `release.jks` 签名文件以便快速构建。*
 
-### 导入红外库
-1. 克隆 `Flipper-IRDB` 仓库。
-2. 运行根目录下的 `python build_ir_database.py` 生成固实化数据库。
-3. 将生成的 `pocket_ir.db` 放入手机的外部存储，并在 App 内选择该文件即可。
+### ⚠️ 重要提示：导入红外库 (必须手动操作)
+**请注意：为了保持应用轻量以及尊重开源协议，PocketIR 默认不附带任何红外码库（.db 文件）。** 你必须使用提供的脚本自己生成数据库。
+
+1. 下载或克隆任意开源的 Flipper 红外库（推荐 [Lucaslhm/Flipper-IRDB](https://github.com/Lucaslhm/Flipper-IRDB)）。
+2. 将项目中的 `build_ir_database.py` 脚本复制到你下载的红外库根目录。
+3. 在终端运行 `python build_ir_database.py`。
+4. 脚本会生成一个 `pocket_ir.db` 文件。将这个文件传输到你手机的存储卡（外部存储）中。
+5. 打开 PocketIR，授予所有文件访问权限，然后在 App 内选择这个 `pocket_ir.db` 即可瞬间完成上万条码库的加载。
 
 ---
 
