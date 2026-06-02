@@ -14,6 +14,10 @@
   <i>专为极客打造的全能便携红外遥控器。</i>
 </p>
 
+<p align="center">
+  <img src="picture/1.png" width="300" alt="PocketIR Screenshot">
+</p>
+
 ---
 
 # English
@@ -32,6 +36,21 @@
   Includes a custom Python script (`build_ir_database.py`) to pack thousands of text-based `.ir` files into a single, high-performance SQLite database (`pocket_ir.db`), dramatically reducing Android file I/O bottlenecks.
 - 🛡️ **Zero Privacy Leaks**
   No network permissions requested. Everything runs 100% locally on your device.
+
+## 🏗 Architecture
+
+PocketIR follows modern Android architecture (MVVM) and is built entirely with Jetpack Compose.
+
+```mermaid
+graph TD
+    UI["Jetpack Compose UI<br>(Screens & Semantic Panels)"] --> VM["MainViewModel<br>(State Management)"]
+    VM --> IrRepo["IrRepository<br>(Database & IO)"]
+    VM --> BookmarkRepo["BookmarkManager"]
+    IrRepo --> DB[("SQLite Database<br>(pocket_ir.db)")]
+    VM --> IrDec["IrDecoder & Transmitter"]
+    IrDec --> Hardware["ConsumerIrManager<br>(Android Hardware API)"]
+    IrDec --> Haptic["HapticEngine<br>(Vibration Feedback)"]
+```
 
 ## 🚀 Getting Started
 
@@ -78,6 +97,21 @@ You can either **download the default `pocket_ir.db` from our GitHub Releases pa
   自带专用的 Python 打包脚本 (`build_ir_database.py`)，可将上万个零散的 `.ir` 文本瞬间“固实化”为一个单体 SQLite 数据库 (`pocket_ir.db`)，彻底解决 Android 的 I/O 性能瓶颈。并在内部启用了 SQLite 显式事务，将建库性能压榨到极致。
 - 🛡️ **绝对的隐私安全**
   App 没有申请任何网络权限（无 `INTERNET`），所有交互 100% 在本地完成。
+
+## 🏗 架构设计
+
+PocketIR 遵循现代 Android 开发架构 (MVVM)，且完全使用 Jetpack Compose 构建。
+
+```mermaid
+graph TD
+    UI["Jetpack Compose UI<br>(各类界面与语义化面板)"] --> VM["MainViewModel<br>(UI 状态管理)"]
+    VM --> IrRepo["IrRepository<br>(数据库读取与文件 IO)"]
+    VM --> BookmarkRepo["BookmarkManager<br>(收藏夹管理)"]
+    IrRepo --> DB[("SQLite 数据库<br>(pocket_ir.db)")]
+    VM --> IrDec["IrDecoder & Transmitter<br>(解码与发射层)"]
+    IrDec --> Hardware["ConsumerIrManager<br>(系统原生红外硬件 API)"]
+    IrDec --> Haptic["HapticEngine<br>(震动马达反馈)"]
+```
 
 ## 🚀 快速开始
 
